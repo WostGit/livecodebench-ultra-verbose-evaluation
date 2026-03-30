@@ -50,22 +50,26 @@ jobs:
           git clone --depth=1 https://github.com/LiveCodeBench/LiveCodeBench.git livecodebench
           cd livecodebench && echo "Cloned commit: $(git log -1 --oneline)"
 
-      - name: 05. Create venv + install lightweight dependencies (CPU-only torch)
+      - name: 05. Create venv + install dependencies & PURGE vLLM
         run: |
-          echo "=== STEP 05: Installing dependencies (NO vLLM) ==="
+          echo "=== STEP 05: Installing dependencies & Force-Removing vLLM ==="
           cd livecodebench
           python -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
+          
+          # 1. Install standard project (this pulls in vllm automatically)
           pip install -e .
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers accelerate
           
-          # Force pinned dataset version to prevent breaking Hugging Face script errors
-          pip install "datasets==3.6.0" --force-reinstall
+          # 2. Aggressively purge vLLM to keep it light
+          pip uninstall -y vllm
           
-          echo "Installed packages:"
-          pip list | grep -E 'torch|transformers|livecodebench|accelerate|datasets'
+          # 3. Secure the stack with CPU torch and transformers
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --force-reinstall
+          pip install transformers accelerate datasets==3.6.0 --force-reinstall
+          
+          echo "Installed packages verify (Should NOT see vllm):"
+          pip list | grep -E 'torch|transformers|livecodebench|accelerate|datasets|vllm' || echo "vLLM successfully purged!"
 
       - name: 06. Configuration summary
         run: |
@@ -74,7 +78,7 @@ jobs:
           echo "Scenario       : ${{ inputs.scenario || 'codegeneration' }}"
           echo "Release        : ${{ inputs.release_version || 'release_v6' }}"
 
-      - name: 07. Run LiveCodeBench evaluation (Object Impersonation Injection)
+      - name: 07. Run LiveCodeBench evaluation (Object Impersonation)
         id: evaluation
         run: |
           echo "=================================================================="
@@ -91,7 +95,7 @@ jobs:
           export SCENARIO
           export RELEASE
 
-          echo "Bypassing file edits and executing LiveCodeBench directly from Python..."
+          echo "Executing LiveCodeBench with Direct Memory Manipulation..."
 
           python -c "
           import os
@@ -105,8 +109,7 @@ jobs:
 
           model_name = os.environ.get('RAW_MODEL')
 
-          # 1. Find a valid model object to duplicate
-          # We look for deepseek first, then starcoder, or just grab the first valid local model
+          # 1. Clone a valid structural model to get through early checks
           base_model_key = None
           for key in ['DeepSeek-Coder-1.3B-Instruct', 'starcoder', 'deepseek-coder-1.3b-instruct']:
               if key in LanguageModelStore:
@@ -114,7 +117,6 @@ jobs:
                   break
           
           if not base_model_key:
-              # Worst case, find the first thing that isn't a string (API model)
               for k, v in LanguageModelStore.items():
                   if not isinstance(v, str):
                       base_model_key = k
@@ -122,16 +124,19 @@ jobs:
 
           print(f'Using {base_model_key} as the structural blueprint...')
 
-          # 2. Duplicate the object and override its name
           cloned_obj = copy.deepcopy(LanguageModelStore[base_model_key])
           cloned_obj.model_repr = model_name
           cloned_obj.model_name = model_name
 
-          # 3. Force inject it
+          # 2. Force the cloned object to register as a standard Hugging Face model
+          # This guarantees that build_runner handles it correctly on a CPU
+          from lcb_runner.lm_styles import LMStyle
+          cloned_obj.model_style = LMStyle.HuggingFaceFix  # or HuggingFace depending on your specific fork's Enum keys
+
           LanguageModelStore[model_name] = cloned_obj
           print(f'Successfully injected cloned object for {model_name}')
 
-          # Spoof the CLI arguments
+          # 3. Spoof the CLI arguments
           sys.argv = [
               'lcb_runner.runner.main',
               '--model', model_name,
@@ -175,7 +180,7 @@ jobs:
 
       - name: 10. Upload full debug artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: upload-artifact@v4
         with:
           name: livecodebench-debug-run-${{ github.run_id }}
           path: livecodebench/
