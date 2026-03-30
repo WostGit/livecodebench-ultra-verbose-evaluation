@@ -70,13 +70,12 @@ jobs:
           echo "Scenario       : ${{ inputs.scenario || 'codegeneration' }}"
           echo "Release        : ${{ inputs.release_version || 'release_v6' }}"
           echo "Note: Using supported LiveCodeBench CLI only. Invalid flags like --max_new_tokens were removed."
-          echo "Tiny 0.5B model → expect low scores. This run will show exactly where it passes vs fails."
 
-      - name: 07. Run LiveCodeBench evaluation (Append Injection + Fallbacks)
+      - name: 07. Run LiveCodeBench evaluation (Direct Memory Injection)
         id: evaluation
         run: |
           echo "=================================================================="
-          echo "=== STEP 07: COMMENCING INJECTION & RUN ==="
+          echo "=== STEP 07: COMMENCING DIRECT INJECTION & RUN ==="
           echo "=================================================================="
           cd livecodebench
           source .venv/bin/activate
@@ -85,50 +84,52 @@ jobs:
           SCENARIO="${{ inputs.scenario || 'codegeneration' }}"
           RELEASE="${{ inputs.release_version || 'release_v6' }}"
 
-          echo "Injecting mapping for $RAW_MODEL into LiveCodeBench source..."
-          
-          # Export the bash variable so the inline Python script can see it
           export RAW_MODEL
-          
+          export SCENARIO
+          export RELEASE
+
+          echo "Bypassing file edits and executing LiveCodeBench directly from Python..."
+
           python -c "
           import os
-          try:
-              model_name = os.environ.get('RAW_MODEL', 'Qwen/Qwen2.5-Coder-0.5B-Instruct')
-              
-              # Append at the bottom of the file to completely bypass function indentation errors
-              with open('lcb_runner/runner/main.py', 'a') as f:
-                  f.write(f'''
-          # --- Injection for Custom Model ---
-          from lcb_runner.lm_styles import LanguageModelStore
-          
-          if \"deepseek-coder-1.3b-instruct\" in LanguageModelStore:
-              LanguageModelStore[\"{model_name}\"] = \"deepseek-coder-1.3b-instruct\"
-              print(\"Successfully mapped to deepseek-coder-1.3b-instruct in memory!\")
-          elif \"starcoder\" in LanguageModelStore:
-              LanguageModelStore[\"{model_name}\"] = \"starcoder\"
-              print(\"Mapped to starcoder as fallback!\")
-          else:
-              first_model = list(LanguageModelStore.keys())[0]
-              LanguageModelStore[\"{model_name}\"] = first_model
-              print(f\"Mapped to fallback model: {{first_model}}\")
-          ''')
-                  
-              print('Successfully forced injection into the bottom of main.py!')
-          except Exception as e:
-              print(f'Failed to manipulate files: {e}')
-          "
+          import sys
 
-          echo "Starting runner execution..."
-          
-          # No pipes like 'tee' used here. If Python crashes, GitHub fails loudly and immediately.
-          python -m lcb_runner.runner.main \
-            --model "$RAW_MODEL" \
-            --scenario "$SCENARIO" \
-            --release_version "$RELEASE" \
-            --evaluate \
-            --n 1 \
-            --temperature 0.0 \
-            --tensor_parallel_size 1
+          # Force the current working directory to the system path so Python finds 'lcb_runner'
+          sys.path.append(os.getcwd())
+
+          from lcb_runner.lm_styles import LanguageModelStore
+          from lcb_runner.runner.main import main
+
+          model_name = os.environ.get('RAW_MODEL')
+
+          # Safe Fallback Logic applied directly in memory:
+          if 'deepseek-coder-1.3b-instruct' in LanguageModelStore:
+              LanguageModelStore[model_name] = 'deepseek-coder-1.3b-instruct'
+              print('Successfully mapped to deepseek-coder-1.3b-instruct in memory!')
+          elif 'starcoder' in LanguageModelStore:
+              LanguageModelStore[model_name] = 'starcoder'
+              print('Mapped to starcoder as fallback!')
+          else:
+              # Worst case, map to whatever the first key in their dictionary is
+              first_model = list(LanguageModelStore.keys())[0]
+              LanguageModelStore[model_name] = first_model
+              print(f'Mapped to fallback model: {first_model}')
+
+          # Spoof the CLI arguments
+          sys.argv = [
+              'lcb_runner.runner.main',
+              '--model', model_name,
+              '--scenario', os.environ.get('SCENARIO'),
+              '--release_version', os.environ.get('RELEASE'),
+              '--evaluate',
+              '--n', '1',
+              '--temperature', '0.0',
+              '--tensor_parallel_size', '1'
+          ]
+
+          # Execute the main function
+          main()
+          "
 
           echo "=================================================================="
           echo "Finalizing output folder checks..."
@@ -151,10 +152,10 @@ jobs:
           cd livecodebench || exit 0
           source .venv/bin/activate || true
 
-          if [ -d "output" ] && [ "$(ls -A output/ 2>/dev/null)" ]; then
+          if [ -d "output" ] && [ \"\$(ls -A output/ 2>/dev/null)\" ]; then
             echo "Found output directory - attempting score computation"
             python -m lcb_runner.evaluation.compute_scores \
-              --eval_all_file \$(find output -name "*eval_all*.json" | head -n 1) \
+              --eval_all_file \$(find output -name \"*eval_all*.json\" | head -n 1) \
               --start_date 2024-01-01 || echo "Score computation failed"
           else
             echo "No output/ results found - evaluation did not produce generations."
