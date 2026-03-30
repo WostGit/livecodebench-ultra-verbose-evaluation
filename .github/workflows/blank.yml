@@ -60,8 +60,12 @@ jobs:
           pip install -e .
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install transformers accelerate
+          
+          # FIX: Force a specific version of datasets to ignore breaking HF changes
+          pip install "datasets==3.6.0" --force-reinstall
+          
           echo "Installed packages:"
-          pip list | grep -E 'torch|transformers|livecodebench|accelerate'
+          pip list | grep -E 'torch|transformers|livecodebench|accelerate|datasets'
 
       - name: 06. Configuration summary
         run: |
@@ -110,7 +114,6 @@ jobs:
               LanguageModelStore[model_name] = 'starcoder'
               print('Mapped to starcoder as fallback!')
           else:
-              # Worst case, map to whatever the first key in their dictionary is
               first_model = list(LanguageModelStore.keys())[0]
               LanguageModelStore[model_name] = first_model
               print(f'Mapped to fallback model: {first_model}')
