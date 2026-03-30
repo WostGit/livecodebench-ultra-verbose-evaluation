@@ -128,13 +128,20 @@ jobs:
           cloned_obj.model_repr = model_name
           cloned_obj.model_name = model_name
 
-          # 2. Force the cloned object to register as a standard Hugging Face model
-          # This guarantees that build_runner handles it correctly on a CPU
-          from lcb_runner.lm_styles import LMStyle
-          cloned_obj.model_style = LMStyle.HuggingFaceFix  # or HuggingFace depending on your specific fork's Enum keys
-
+          # Force the style to match the exact ENUM of whatever we cloned.
+          # This guarantees build_runner doesn't throw AttributeErrors.
           LanguageModelStore[model_name] = cloned_obj
           print(f'Successfully injected cloned object for {model_name}')
+
+          # 2. Force HuggingFaceRunner instead of VLLMRunner directly in code
+          import lcb_runner.runner.runner_utils as runner_utils
+          from lcb_runner.runner.huggingface_runner import HuggingFaceRunner
+
+          def custom_build_runner(args, model):
+              print('OVERRIDE DETECTED: Forcing native HuggingFaceRunner because vLLM was purged!')
+              return HuggingFaceRunner(args, model)
+
+          runner_utils.build_runner = custom_build_runner
 
           # 3. Spoof the CLI arguments
           sys.argv = [
@@ -180,7 +187,7 @@ jobs:
 
       - name: 10. Upload full debug artifacts
         if: always()
-        uses: upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: livecodebench-debug-run-${{ github.run_id }}
           path: livecodebench/
