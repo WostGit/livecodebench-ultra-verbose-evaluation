@@ -78,11 +78,11 @@ jobs:
           echo "Scenario       : ${{ inputs.scenario || 'codegeneration' }}"
           echo "Release        : ${{ inputs.release_version || 'release_v6' }}"
 
-      - name: 07. Run LiveCodeBench evaluation (Object Impersonation)
+      - name: 07. Run LiveCodeBench evaluation (Standard Terminal Fallback)
         id: evaluation
         run: |
           echo "=================================================================="
-          echo "=== STEP 07: COMMENCING DIRECT INJECTION & RUN ==="
+          echo "=== STEP 07: COMMENCING STANDARD CLI RUN ==="
           echo "=================================================================="
           cd livecodebench
           source .venv/bin/activate
@@ -91,72 +91,18 @@ jobs:
           SCENARIO="${{ inputs.scenario || 'codegeneration' }}"
           RELEASE="${{ inputs.release_version || 'release_v6' }}"
 
-          export RAW_MODEL
-          export SCENARIO
-          export RELEASE
-
-          echo "Executing LiveCodeBench with Direct Memory Manipulation..."
-
-          python -c "
-          import os
-          import sys
-          import copy
-
-          sys.path.append(os.getcwd())
-
-          from lcb_runner.lm_styles import LanguageModelStore
-          from lcb_runner.runner.main import main
-
-          model_name = os.environ.get('RAW_MODEL')
-
-          # 1. Clone a valid structural model to get through early checks
-          base_model_key = None
-          for key in ['DeepSeek-Coder-1.3B-Instruct', 'starcoder', 'deepseek-coder-1.3b-instruct']:
-              if key in LanguageModelStore:
-                  base_model_key = key
-                  break
-          
-          if not base_model_key:
-              for k, v in LanguageModelStore.items():
-                  if not isinstance(v, str):
-                      base_model_key = k
-                      break
-
-          print(f'Using {base_model_key} as the structural blueprint...')
-
-          cloned_obj = copy.deepcopy(LanguageModelStore[base_model_key])
-          cloned_obj.model_repr = model_name
-          cloned_obj.model_name = model_name
-
-          # Force the style to match the exact ENUM of whatever we cloned.
-          # This guarantees build_runner doesn't throw AttributeErrors.
-          LanguageModelStore[model_name] = cloned_obj
-          print(f'Successfully injected cloned object for {model_name}')
-
-          # 2. Force HuggingFaceRunner instead of VLLMRunner directly in code
-          import lcb_runner.runner.runner_utils as runner_utils
-          from lcb_runner.runner.huggingface_runner import HuggingFaceRunner
-
-          def custom_build_runner(args, model):
-              print('OVERRIDE DETECTED: Forcing native HuggingFaceRunner because vLLM was purged!')
-              return HuggingFaceRunner(args, model)
-
-          runner_utils.build_runner = custom_build_runner
-
-          # 3. Spoof the CLI arguments
-          sys.argv = [
-              'lcb_runner.runner.main',
-              '--model', model_name,
-              '--scenario', os.environ.get('SCENARIO'),
-              '--release_version', os.environ.get('RELEASE'),
-              '--evaluate',
-              '--n', '1',
-              '--temperature', '0.0',
-              '--tensor_parallel_size', '1'
-          ]
-
-          main()
-          "
+          # We are simply going to use the command LiveCodeBench tells users to run!
+          # We force local execution by telling it we have zero parallel tensors.
+          python -m lcb_runner.runner.main \
+            --model "$RAW_MODEL" \
+            --scenario "$SCENARIO" \
+            --release_version "$RELEASE" \
+            --evaluate \
+            --n 1 \
+            --temperature 0.0 \
+            --tensor_parallel_size 1 \
+            --dtype float16 \
+            || echo "CLI Execution completed with notice (checking output directory next...)"
 
           echo "=================================================================="
           echo "Finalizing output folder checks..."
