@@ -61,7 +61,7 @@ jobs:
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install transformers accelerate
           
-          # FIX: Force a specific version of datasets to ignore breaking HF changes
+          # Force the pinned dataset version to prevent huggingface script errors
           pip install "datasets==3.6.0" --force-reinstall
           
           echo "Installed packages:"
@@ -73,7 +73,6 @@ jobs:
           echo "Model          : ${{ inputs.model_name || 'Qwen/Qwen2.5-Coder-0.5B-Instruct' }}"
           echo "Scenario       : ${{ inputs.scenario || 'codegeneration' }}"
           echo "Release        : ${{ inputs.release_version || 'release_v6' }}"
-          echo "Note: Using supported LiveCodeBench CLI only. Invalid flags like --max_new_tokens were removed."
 
       - name: 07. Run LiveCodeBench evaluation (Direct Memory Injection)
         id: evaluation
@@ -98,7 +97,6 @@ jobs:
           import os
           import sys
 
-          # Force the current working directory to the system path so Python finds 'lcb_runner'
           sys.path.append(os.getcwd())
 
           from lcb_runner.lm_styles import LanguageModelStore
@@ -106,17 +104,23 @@ jobs:
 
           model_name = os.environ.get('RAW_MODEL')
 
-          # Safe Fallback Logic applied directly in memory:
-          if 'deepseek-coder-1.3b-instruct' in LanguageModelStore:
-              LanguageModelStore[model_name] = 'deepseek-coder-1.3b-instruct'
-              print('Successfully mapped to deepseek-coder-1.3b-instruct in memory!')
-          elif 'starcoder' in LanguageModelStore:
-              LanguageModelStore[model_name] = 'starcoder'
-              print('Mapped to starcoder as fallback!')
+          # FORCE A SPECIFIC TINY MODEL (Casing fixed to DeepSeek-Coder-1.3B-Instruct)
+          target_fallback = 'DeepSeek-Coder-1.3B-Instruct'
+
+          if target_fallback in LanguageModelStore:
+              LanguageModelStore[model_name] = target_fallback
+              print(f'Successfully mapped to {target_fallback} in memory!')
           else:
-              first_model = list(LanguageModelStore.keys())[0]
-              LanguageModelStore[model_name] = first_model
-              print(f'Mapped to fallback model: {first_model}')
+              # If for some reason DeepSeek isn't there, look for Starcoder
+              if 'starcoder' in LanguageModelStore:
+                  LanguageModelStore[model_name] = 'starcoder'
+                  print('Mapped to starcoder as fallback!')
+              else:
+                  # If all else fails, pick the smallest model name in the dict by string length
+                  # (Short string lengths typically mean base models like starcoder vs massive instruct models)
+                  smallest_model = min(list(LanguageModelStore.keys()), key=len)
+                  LanguageModelStore[model_name] = smallest_model
+                  print(f'Aggressive fallback: Mapped to shortest key name: {smallest_model}')
 
           # Spoof the CLI arguments
           sys.argv = [
@@ -130,7 +134,6 @@ jobs:
               '--tensor_parallel_size', '1'
           ]
 
-          # Execute the main function
           main()
           "
 
@@ -143,10 +146,8 @@ jobs:
         run: |
           echo "=== STEP 08: DEBUG INSPECTION ==="
           cd livecodebench || true
-          echo "Directory listing:"
           ls -la
           echo ""
-          echo "Output directory contents:"
           ls -la output/ 2>/dev/null || echo "output/ does not exist"
 
       - name: 09. Compute scores if results exist
@@ -156,12 +157,11 @@ jobs:
           source .venv/bin/activate || true
 
           if [ -d "output" ] && [ \"\$(ls -A output/ 2>/dev/null)\" ]; then
-            echo "Found output directory - attempting score computation"
             python -m lcb_runner.evaluation.compute_scores \
               --eval_all_file \$(find output -name \"*eval_all*.json\" | head -n 1) \
               --start_date 2024-01-01 || echo "Score computation failed"
           else
-            echo "No output/ results found - evaluation did not produce generations."
+            echo "No output/ results found."
           fi
 
       - name: 10. Upload full debug artifacts
@@ -177,7 +177,4 @@ jobs:
         run: |
           echo "=================================================================="
           echo "WORKFLOW FINISHED"
-          echo "=================================================================="
-          echo "Review run log to see if the injection held."
-          echo "Download the artifact to inspect logs and any generated results."
           echo "=================================================================="
