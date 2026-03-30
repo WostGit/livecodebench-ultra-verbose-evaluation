@@ -1,4 +1,4 @@
-name: Ultra Verbose LiveCodeBench Evaluation - Qwen2.5-Coder-0.5B (Defensive + Fallbacks)
+name: Ultra Verbose LiveCodeBench Evaluation - Qwen2.5-Coder-0.5B (Fixed + Defensive)
 
 on:
   push:
@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       model_name:
-        description: 'Hugging Face model to evaluate (default: tiny Qwen2.5-Coder-0.5B-Instruct)'
+        description: 'Hugging Face model to evaluate'
         required: false
         default: 'Qwen/Qwen2.5-Coder-0.5B-Instruct'
       scenario:
-        description: 'Scenario to run (codegeneration is safest for small models)'
+        description: 'LiveCodeBench scenario'
         required: false
         default: 'codegeneration'
         type: choice
@@ -22,7 +22,7 @@ on:
           - codeexecution
           - testoutputprediction
       release_version:
-        description: 'LiveCodeBench release (e.g. release_v6)'
+        description: 'Release version (e.g. release_v6)'
         required: false
         default: 'release_v6'
 
@@ -39,111 +39,109 @@ jobs:
       cancel-in-progress: true
 
     steps:
-      - name: 01. Checkout repository code (with full history)
+      - name: 01. Checkout THIS repository code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
         continue-on-error: false
 
-      - name: 02. Set up Python 3.11 (with fallback to 3.10)
+      - name: 02. Set up Python 3.11 (no automatic cache to avoid the requirements.txt/pyproject.toml error)
         id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          # cache: 'pip'  ← REMOVED: This was the source of the error because it looks in the wrong directory
         continue-on-error: true
 
-      - name: 03. Fallback Python setup if 3.11 failed
+      - name: 03. Fallback to Python 3.10 if 3.11 setup fails
         if: steps.setup-python.outcome == 'failure'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
 
-      - name: 04. Install system dependencies (with retries and fallback)
+      - name: 04. Install system dependencies (with retry logic)
         id: sys-deps
         run: |
-          echo "=== STEP 04: Installing system dependencies with defensive approach ==="
-          echo "These are needed for code execution, building, and potential sandboxing."
+          echo "=== STEP 04: Installing required system packages ==="
+          echo "Purpose: Needed for building packages, code execution, and Docker (optional sandbox)."
           for attempt in {1..3}; do
-            echo "Attempt $attempt/3..."
-            sudo apt-get update && \
-            sudo apt-get install -y \
-              python3-dev build-essential libssl-dev libffi-dev docker.io \
-              && echo "System dependencies installed successfully." && break || \
-            echo "Attempt $attempt failed. Waiting 5s..." && sleep 5
-          done || echo "WARNING: Some system packages failed to install. Continuing with limited functionality."
+            echo "Installation attempt $attempt/3..."
+            sudo apt-get update -qq && \
+            sudo apt-get install -y --no-install-recommends \
+              python3-dev build-essential libssl-dev libffi-dev docker.io && \
+            echo "✅ System dependencies installed successfully." && break || \
+            { echo "Attempt $attempt failed. Retrying in 5 seconds..."; sleep 5; }
+          done || echo "⚠️ Some system packages could not be installed. Continuing anyway (may limit functionality)."
         continue-on-error: true
 
-      - name: 05. Clone LiveCodeBench repository (with fallback clone method)
+      - name: 05. Clone LiveCodeBench repository (with fallback)
         id: clone-lcb
         run: |
-          echo "=== STEP 05: Cloning LiveCodeBench (official repo) ==="
-          echo "URL: https://github.com/LiveCodeBench/LiveCodeBench.git"
-          rm -rf livecodebench || true
+          echo "=== STEP 05: Cloning official LiveCodeBench repository ==="
+          rm -rf livecodebench 2>/dev/null || true
           git clone https://github.com/LiveCodeBench/LiveCodeBench.git livecodebench && \
-          echo "Clone successful." || \
-          { echo "Git clone failed. Trying fallback with depth=1..."; \
+          echo "✅ Clone successful" || \
+          { echo "Primary clone failed. Trying shallow clone..."; \
             git clone --depth=1 https://github.com/LiveCodeBench/LiveCodeBench.git livecodebench; }
-          cd livecodebench && git log -1 --oneline
+          cd livecodebench && echo "Current commit: $(git log -1 --oneline)"
         continue-on-error: true
 
-      - name: 06. Install uv package manager (fast installer)
+      - name: 06. Install uv (fast Python package manager recommended by LiveCodeBench)
         run: |
-          echo "=== STEP 06: Installing uv (recommended by LiveCodeBench) ==="
-          curl -LsSf https://astral.sh/uv/install.sh | sh || echo "uv install failed. Will use pip as fallback."
+          echo "=== STEP 06: Installing uv ==="
+          curl -LsSf https://astral.sh/uv/install.sh | sh || echo "⚠️ uv install failed. Will fall back to pip."
         continue-on-error: true
 
-      - name: 07. Create virtual environment and install LiveCodeBench + vLLM (ultra defensive)
+      - name: 07. Set up virtual environment + install LiveCodeBench dependencies (ultra defensive)
         id: install-deps
         run: |
-          echo "=== STEP 07: Setting up Python environment and dependencies ==="
-          cd livecodebench || { echo "ERROR: livecodebench directory missing. Aborting install."; exit 1; }
+          echo "=== STEP 07: Installing LiveCodeBench dependencies ==="
+          cd livecodebench || { echo "❌ livecodebench directory not found. Aborting."; exit 1; }
 
-          # Try uv first
+          # Try uv first (official recommendation)
           if command -v uv >/dev/null 2>&1; then
-            echo "Using uv for installation..."
-            uv venv --python $(python --version | cut -d' ' -f2) || true
-            uv pip install -e . || echo "uv pip install -e . failed."
-            uv pip install vllm --extra-index-url https://download.pytorch.org/whl/cpu || echo "vLLM install failed (CPU fallback)."
+            echo "Using uv for installation (recommended)..."
+            uv venv --python $(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") || true
+            uv pip install -e . || echo "⚠️ uv pip install -e . failed."
+            uv pip install "vllm>=0.6.0" --extra-index-url https://download.pytorch.org/whl/cpu || echo "⚠️ vLLM install failed (CPU fallback)."
           else
-            echo "uv not found. Falling back to venv + pip..."
+            echo "uv not available. Falling back to standard venv + pip..."
             python -m venv .venv
             source .venv/bin/activate
             pip install --upgrade pip
             pip install -e .
-            pip install vllm --extra-index-url https://download.pytorch.org/whl/cpu || echo "vLLM pip install failed."
+            pip install "vllm>=0.6.0" --extra-index-url https://download.pytorch.org/whl/cpu || echo "⚠️ vLLM pip install failed."
           fi
 
-          echo "Installed packages:"
-          pip list || echo "pip list failed."
+          echo "Installed packages summary:"
+          pip list | head -n 30 || echo "pip list command failed."
         continue-on-error: true
 
-      - name: 08. Log model and scenario details (for transparency)
+      - name: 08. Configuration summary (what we are about to test)
         run: |
           echo "=== STEP 08: Configuration Summary ==="
           echo "Model          : ${{ inputs.model_name || 'Qwen/Qwen2.5-Coder-0.5B-Instruct' }}"
           echo "Scenario       : ${{ inputs.scenario || 'codegeneration' }}"
           echo "Release        : ${{ inputs.release_version || 'release_v6' }}"
-          echo "Note: This is a 0.5B parameter model → expect very low pass@1 scores (often 5-20%)."
-          echo "It will pass some easy problems and fail most medium/hard competitive programming tasks."
-          echo "This workflow is designed to show exactly where it succeeds and where it fails."
+          echo ""
+          echo "Note about tiny models (0.5B):"
+          echo "→ Expect low pass@1 scores (typically 5–25% on recent LiveCodeBench problems)."
+          echo "→ The model will pass very easy algorithmic tasks and fail most medium/hard contest problems."
+          echo "This run will clearly show the exact failure points."
 
-      - name: 09. Run LiveCodeBench evaluation (with heavy error handling + fallback)
+      - name: 09. Run LiveCodeBench evaluation (with fallback command)
         id: run-evaluation
         run: |
-          echo "=== STEP 09: Running LiveCodeBench evaluation ==="
+          echo "=== STEP 09: Executing LiveCodeBench evaluation ==="
           cd livecodebench || exit 1
 
           MODEL="${{ inputs.model_name || 'Qwen/Qwen2.5-Coder-0.5B-Instruct' }}"
           SCENARIO="${{ inputs.scenario || 'codegeneration' }}"
           RELEASE="${{ inputs.release_version || 'release_v6' }}"
 
-          echo "Command preview:"
-          echo "python -m lcb_runner.runner.main --model $MODEL --scenario $SCENARIO --release_version $RELEASE --evaluate ..."
+          echo "Running with model: $MODEL | scenario: $SCENARIO"
 
-          # Main attempt with try-like structure
-          set +e  # Do not exit on error
+          set +e
           python -m lcb_runner.runner.main \
             --model "$MODEL" \
             --scenario "$SCENARIO" \
@@ -153,19 +151,13 @@ jobs:
             --temperature 0.0 \
             --max_new_tokens 2048 \
             --tensor_parallel_size 1 \
-            --output_dir "./outputs/${SCENARIO}" \
-            --stop "" 2>&1 | tee evaluation.log
+            --output_dir "./outputs/${SCENARIO}" 2>&1 | tee evaluation.log
 
           EXIT_CODE=$?
           set -e
 
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "SUCCESS: Evaluation completed without errors."
-          else
-            echo "WARNING: Main evaluation exited with code $EXIT_CODE."
-            echo "Attempting minimal fallback run (no vLLM, smaller limits)..."
-
-            # Fallback: simpler command
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "⚠️ Main run failed (exit code $EXIT_CODE). Trying simplified fallback..."
             python -m lcb_runner.runner.main \
               --model "$MODEL" \
               --scenario "$SCENARIO" \
@@ -175,42 +167,39 @@ jobs:
               --temperature 0.0 \
               --max_new_tokens 1024 \
               --output_dir "./outputs/${SCENARIO}_fallback" 2>&1 | tee fallback.log || \
-              echo "Fallback also failed. No generations produced."
+              echo "❌ Fallback also failed. No results generated."
+          else
+            echo "✅ Main evaluation completed successfully."
           fi
         continue-on-error: true
 
-      - name: 10. Compute and display scores (with multiple fallback methods)
-        id: compute-scores
+      - name: 10. Compute scores (with graceful fallback)
         run: |
-          echo "=== STEP 10: Computing final scores ==="
-          cd livecodebench || exit 1
+          echo "=== STEP 10: Computing and displaying scores ==="
+          cd livecodebench || exit 0
 
-          # Try to find any eval file
-          EVAL_FILE=$(find ./outputs -name "*eval_all*.json" -o -name "results*.json" | head -n 1 || echo "")
-
+          EVAL_FILE=$(find ./outputs -name "*eval_all*.json" | head -n 1 || echo "")
           if [ -n "$EVAL_FILE" ] && [ -f "$EVAL_FILE" ]; then
-            echo "Found evaluation file: $EVAL_FILE"
+            echo "Using evaluation file: $EVAL_FILE"
             python -m lcb_runner.evaluation.compute_scores \
               --eval_all_file "$EVAL_FILE" \
               --start_date 2024-01-01 2>&1 | tee scores.log || \
-              echo "compute_scores failed. Trying direct Python fallback..."
+              echo "Score computation command failed."
           else
-            echo "No evaluation file found. Skipping score computation."
+            echo "No evaluation results file found. Skipping score calculation."
           fi
 
-          # Ultra-fallback: simple summary if everything else fails
           echo ""
-          echo "=== FINAL SUMMARY FOR TINY MODEL (Qwen2.5-Coder-0.5B) ==="
-          echo "Small models like this typically achieve low pass@1."
-          echo "Check the logs above for exact numbers."
-          echo "Common outcome: Passes very easy algorithmic problems, fails on anything requiring deeper reasoning or complex data structures."
+          echo "=== TINY MODEL SUMMARY ==="
+          echo "Qwen2.5-Coder-0.5B is expected to have low accuracy."
+          echo "Check the logs above and the uploaded artifacts for detailed pass/fail breakdown."
         continue-on-error: true
 
-      - name: 11. Upload all artifacts (logs, outputs, even partial results)
+      - name: 11. Upload all artifacts (logs + outputs + partial results)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: livecodebench-full-results-${{ github.run_id }}
+          name: livecodebench-results-run-${{ github.run_id }}
           path: |
             livecodebench/outputs/
             livecodebench/*.log
@@ -219,21 +208,13 @@ jobs:
             livecodebench/scores.log
           retention-days: 60
 
-      - name: 12. Final ultra-verbose status message
+      - name: 12. Final status message
         if: always()
         run: |
           echo "=================================================================="
-          echo "                  WORKFLOW COMPLETED (ULTRA VERBOSE MODE)         "
+          echo "                  WORKFLOW FINISHED (ULTRA VERBOSE MODE)"
           echo "=================================================================="
-          echo "Model evaluated : ${{ inputs.model_name || 'Qwen/Qwen2.5-Coder-0.5B-Instruct' }}"
-          echo "Scenario        : ${{ inputs.scenario || 'codegeneration' }}"
-          echo ""
-          echo "This workflow includes:"
-          echo "• Multiple fallback paths for every critical step"
-          echo "• Detailed logging of success/failure at each stage"
-          echo "• Graceful degradation instead of hard failures"
-          echo "• Artifact upload even if parts of the run crashed"
-          echo ""
-          echo "For a 0.5B model you will see many failures on harder problems — this is expected and educational."
-          echo "Use the uploaded artifacts and step logs to analyze exactly where the model passes vs. fails."
+          echo "The previous 'requirements.txt / pyproject.toml' error has been fixed by removing automatic pip caching."
+          echo "All critical steps now have fallbacks and detailed logging."
+          echo "Check the step logs and downloaded artifacts to see exactly where the 0.5B model passes or fails."
           echo "=================================================================="
