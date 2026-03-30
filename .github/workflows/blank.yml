@@ -91,8 +91,6 @@ jobs:
           SCENARIO="${{ inputs.scenario || 'codegeneration' }}"
           RELEASE="${{ inputs.release_version || 'release_v6' }}"
 
-          # We are simply going to use the command LiveCodeBench tells users to run!
-          # We force local execution by telling it we have zero parallel tensors.
           python -m lcb_runner.runner.main \
             --model "$RAW_MODEL" \
             --scenario "$SCENARIO" \
@@ -123,12 +121,19 @@ jobs:
           cd livecodebench || exit 0
           source .venv/bin/activate || true
 
-          if [ -d "output" ] && [ \"\$(ls -A output/ 2>/dev/null)\" ]; then
-            python -m lcb_runner.evaluation.compute_scores \
-              --eval_all_file \$(find output -name \"*eval_all*.json\" | head -n 1) \
-              --start_date 2024-01-01 || echo "Score computation failed"
+          # Using the | operator ensures clean, un-escaped Bash processing
+          if [ -d "output" ]; then
+            EVAL_FILE=$(find output -name "*eval_all*.json" | head -n 1)
+            if [ -n "$EVAL_FILE" ]; then
+              echo "Found evaluation file: $EVAL_FILE"
+              python -m lcb_runner.evaluation.compute_scores \
+                --eval_all_file "$EVAL_FILE" \
+                --start_date 2024-01-01 || echo "Score computation failed"
+            else
+              echo "No *eval_all*.json file found in output directory."
+            fi
           else
-            echo "No output/ results found."
+            echo "No output/ directory found."
           fi
 
       - name: 10. Upload full debug artifacts
