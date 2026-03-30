@@ -72,11 +72,11 @@ jobs:
           echo "Note: Using supported LiveCodeBench CLI only. Invalid flags like --max_new_tokens were removed."
           echo "Tiny 0.5B model → expect low scores. This run will show exactly where it passes vs fails."
 
-      - name: 07. Run LiveCodeBench evaluation (Auto-evaluating best solutions)
+      - name: 07. Run LiveCodeBench evaluation (Forced Dictionary Injection)
         id: evaluation
         run: |
           echo "=================================================================="
-          echo "=== STEP 07: COMMENCING MULTI-SOLUTION EVALUATION ARENA ==="
+          echo "=== STEP 07: COMMENCING INJECTION & RUN ==="
           echo "=================================================================="
           cd livecodebench
           source .venv/bin/activate
@@ -84,95 +84,49 @@ jobs:
           RAW_MODEL="${{ inputs.model_name || 'Qwen/Qwen2.5-Coder-0.5B-Instruct' }}"
           SCENARIO="${{ inputs.scenario || 'codegeneration' }}"
           RELEASE="${{ inputs.release_version || 'release_v6' }}"
-          
-          APPROACH_1_SUCCESS=false
-          APPROACH_2_SUCCESS=false
 
-          # -----------------------------------------------------------
-          # APPROACH 1: Using --local_model_path flag with known mapping
-          # -----------------------------------------------------------
-          echo ""
-          echo "--- Testing Approach 1: Using fallback model mapping with local path ---"
-          echo "Idea: Tell it we are using 'qwen2.5-coder-7b' (known style) but point the physical download to 0.5B."
+          echo "Injecting mapping for $RAW_MODEL into LiveCodeBench source..."
           
-          (python -m lcb_runner.runner.main \
-            --model "qwen2.5-coder-7b" \
-            --local_model_path "$RAW_MODEL" \
+          python -c "
+          import os
+          try:
+              # We import the store and physically bind your model string to an existing model structure
+              with open('lcb_runner/lm_styles.py', 'r') as f:
+                  content = f.read()
+              
+              # We find where the LanguageModelStore is instantiated and force your model in
+              with open('lcb_runner/runner/main.py', 'r') as f:
+                  main_code = f.read()
+              
+              injection = f'\nfrom lcb_runner.lm_styles import LanguageModelStore\nLanguageModelStore[\"{RAW_MODEL}\"] = \"deepseek-coder-1.3b-instruct\"\n'
+              
+              # Place injection right before the main block handles it
+              main_code = main_code.replace('def main():', injection + 'def main():')
+              
+              with open('lcb_runner/runner/main.py', 'w') as f:
+                  f.write(main_code)
+                  
+              print('Successfully forced injection into main.py memory!')
+          except Exception as e:
+              print(f'Failed to manipulate files: {e}')
+          "
+
+          echo "Starting runner execution..."
+          
+          # We removed 'set +e' and the pipe to 'tee'. 
+          # If Python fails, GitHub Actions will STOP immediately and throw a red X.
+          python -m lcb_runner.runner.main \
+            --model "$RAW_MODEL" \
             --scenario "$SCENARIO" \
             --release_version "$RELEASE" \
             --evaluate \
             --n 1 \
             --temperature 0.0 \
-            --tensor_parallel_size 1 2>&1 | tee approach1.log) && APPROACH_1_SUCCESS=true || APPROACH_1_SUCCESS=false
-
-          echo "Approach 1 Finished. Success status: $APPROACH_1_SUCCESS"
-          
-          # -----------------------------------------------------------
-          # APPROACH 2: Force-injecting dict mapping via Python
-          # -----------------------------------------------------------
-          echo ""
-          echo "--- Testing Approach 2: Force-injecting mapping into Python code ---"
-          
-          if [ "$APPROACH_1_SUCCESS" = "true" ]; then
-             echo "Approach 1 was already successful! Skipping physical edit of the files."
-          else
-             echo "Approach 1 failed. Proceeding to manipulate the benchmark code to accept the string."
-             
-             python -c "
-          import os
-          try:
-              # Inject our desired string mapped to the Qwen style straight into the lm_styles dictionary
-              with open('lcb_runner/lm_styles.py', 'r') as f:
-                  content = f.read()
-              
-              if 'Qwen/Qwen2.5-Coder-0.5B-Instruct' not in content:
-                  content = content.replace('\"qwen2.5-coder-7b\":', '\"Qwen/Qwen2.5-Coder-0.5B-Instruct\": \"qwen2.5-coder-7b\",\n    \"qwen2.5-coder-7b\":')
-                  with open('lcb_runner/lm_styles.py', 'w') as f:
-                      f.write(content)
-                  print('Successfully injected string into lm_styles.py!')
-          except Exception as e:
-              print(f'Failed to manipulate files: {e}')
-          "
-
-             (python -m lcb_runner.runner.main \
-               --model "$RAW_MODEL" \
-               --scenario "$SCENARIO" \
-               --release_version "$RELEASE" \
-               --evaluate \
-               --n 1 \
-               --temperature 0.0 \
-               --tensor_parallel_size 1 2>&1 | tee approach2.log) && APPROACH_2_SUCCESS=true || APPROACH_2_SUCCESS=false
-             
-             echo "Approach 2 Finished. Success status: $APPROACH_2_SUCCESS"
-          fi
-
-          # -----------------------------------------------------------
-          # ARENA RESULTS REPORTING
-          # -----------------------------------------------------------
-          echo ""
-          echo "=================================================================="
-          echo "=== ARENA RESULTS ==="
-          echo "=================================================================="
-          
-          if [ "$APPROACH_1_SUCCESS" = "true" ]; then
-             echo "🏆 WINNER: Approach 1 (Native --local_model_path flag) was successful!"
-             cp approach1.log evaluation.log
-          elif [ "$APPROACH_2_SUCCESS" = "true" ]; then
-             echo "🏆 WINNER: Approach 2 (Forced Code Injection) was successful!"
-             cp approach2.log evaluation.log
-          else
-             echo "❌ CRITICAL FAILURE: Both approaches failed."
-             echo "Dumping the last 30 lines of Approach 1 log:"
-             tail -n 30 approach1.log
-             echo ""
-             echo "Dumping the last 30 lines of Approach 2 log:"
-             tail -n 30 approach2.log || true
-             exit 1 # Hard fail the GitHub Action so it doesn't mask errors anymore
-          fi
+            --tensor_parallel_size 1
 
           echo "=================================================================="
-          echo "Checking output folder..."
-          ls -la output/ 2>/dev/null || echo "No output/ directory created by the winning method."
+          echo "Finalizing output folder checks..."
+          ls -la output/ 2>/dev/null || echo "No output/ directory created."
 
       - name: 08. Full debug inspection (always run)
         if: always()
@@ -184,9 +138,6 @@ jobs:
           echo ""
           echo "Output directory contents:"
           ls -la output/ 2>/dev/null || echo "output/ does not exist"
-          echo ""
-          echo "Full evaluation log tail:"
-          cat evaluation.log 2>/dev/null | tail -n 100 || echo "No evaluation.log"
 
       - name: 09. Compute scores if results exist
         run: |
@@ -198,7 +149,7 @@ jobs:
             echo "Found output directory - attempting score computation"
             python -m lcb_runner.evaluation.compute_scores \
               --eval_all_file $(find output -name "*eval_all*.json" | head -n 1) \
-              --start_date 2024-01-01 2>&1 | tee scores.log || echo "Score computation failed"
+              --start_date 2024-01-01 || echo "Score computation failed"
           else
             echo "No output/ results found - evaluation did not produce generations."
           fi
@@ -217,6 +168,6 @@ jobs:
           echo "=================================================================="
           echo "WORKFLOW FINISHED"
           echo "=================================================================="
+          echo "Review run log to see if the injection held."
           echo "Download the artifact to inspect logs and any generated results."
-          echo "For Qwen2.5-Coder-0.5B expect low pass@1 - this is normal and informative."
           echo "=================================================================="
