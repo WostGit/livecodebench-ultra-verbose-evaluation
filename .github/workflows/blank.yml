@@ -61,7 +61,7 @@ jobs:
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install transformers accelerate
           
-          # Force the pinned dataset version to prevent huggingface script errors
+          # Force pinned dataset version to prevent breaking Hugging Face script errors
           pip install "datasets==3.6.0" --force-reinstall
           
           echo "Installed packages:"
@@ -74,7 +74,7 @@ jobs:
           echo "Scenario       : ${{ inputs.scenario || 'codegeneration' }}"
           echo "Release        : ${{ inputs.release_version || 'release_v6' }}"
 
-      - name: 07. Run LiveCodeBench evaluation (Direct Memory Injection)
+      - name: 07. Run LiveCodeBench evaluation (Object-Based Memory Injection)
         id: evaluation
         run: |
           echo "=================================================================="
@@ -104,23 +104,15 @@ jobs:
 
           model_name = os.environ.get('RAW_MODEL')
 
-          # FORCE A SPECIFIC TINY MODEL (Casing fixed to DeepSeek-Coder-1.3B-Instruct)
-          target_fallback = 'DeepSeek-Coder-1.3B-Instruct'
+          # 1. Create a dummy object to satisfy the .model_repr requirement
+          class DummyModelObj:
+              def __init__(self, name):
+                  self.model_repr = name
+                  self.model_name = name
 
-          if target_fallback in LanguageModelStore:
-              LanguageModelStore[model_name] = target_fallback
-              print(f'Successfully mapped to {target_fallback} in memory!')
-          else:
-              # If for some reason DeepSeek isn't there, look for Starcoder
-              if 'starcoder' in LanguageModelStore:
-                  LanguageModelStore[model_name] = 'starcoder'
-                  print('Mapped to starcoder as fallback!')
-              else:
-                  # If all else fails, pick the smallest model name in the dict by string length
-                  # (Short string lengths typically mean base models like starcoder vs massive instruct models)
-                  smallest_model = min(list(LanguageModelStore.keys()), key=len)
-                  LanguageModelStore[model_name] = smallest_model
-                  print(f'Aggressive fallback: Mapped to shortest key name: {smallest_model}')
+          # 2. Force inject it into the dictionary
+          LanguageModelStore[model_name] = DummyModelObj(model_name)
+          print(f'Successfully injected custom object for {model_name}')
 
           # Spoof the CLI arguments
           sys.argv = [
@@ -134,6 +126,7 @@ jobs:
               '--tensor_parallel_size', '1'
           ]
 
+          # Run the pipeline!
           main()
           "
 
