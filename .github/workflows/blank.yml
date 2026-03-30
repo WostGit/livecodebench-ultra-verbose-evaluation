@@ -78,11 +78,11 @@ jobs:
           echo "Scenario       : ${{ inputs.scenario || 'codegeneration' }}"
           echo "Release        : ${{ inputs.release_version || 'release_v6' }}"
 
-      - name: 07. Run LiveCodeBench evaluation (Dictionary Injection + Fallback Runner)
+      - name: 07. Run LiveCodeBench evaluation (Hardcoded HF Fallback)
         id: evaluation
         run: |
           echo "=================================================================="
-          echo "=== STEP 07: COMMENCING INJECTED RUN ==="
+          echo "=== STEP 07: COMMENCING HARD-PATCHED RUN ==="
           echo "=================================================================="
           cd livecodebench
           source .venv/bin/activate
@@ -95,6 +95,26 @@ jobs:
           export SCENARIO
           export RELEASE
 
+          # 1. HARD PATCH: Physically overwrite build_runner in the file system 
+          # to return HuggingFaceRunner instead of attempting to load VLLM.
+          python -c "
+          import os
+          file_path = 'lcb_runner/runner/runner_utils.py'
+          with open(file_path, 'r') as f:
+              content = f.read()
+          
+          # We replace the VLLM return statement directly with the HuggingFace fallback
+          if 'from lcb_runner.runner.vllm_runner import VLLMRunner' in content:
+              patched = content.replace('from lcb_runner.runner.vllm_runner import VLLMRunner', 'from lcb_runner.runner.huggingface_runner import HuggingFaceRunner')
+              patched = patched.replace('return VLLMRunner(args, model)', 'return HuggingFaceRunner(args, model)')
+              with open(file_path, 'w') as f:
+                  f.write(patched)
+              print('Successfully hard-patched runner_utils.py to bypass vLLM!')
+          else:
+              print('Could not find vLLM imports in file. Proceeding with caution.')
+          "
+
+          # 2. Run execution via injected Python to maintain dictionary keys
           python -c "
           import os
           import sys
@@ -104,11 +124,10 @@ jobs:
 
           from lcb_runner.lm_styles import LanguageModelStore
           from lcb_runner.runner.main import main
-          import lcb_runner.runner.runner_utils as runner_utils
 
           model_name = os.environ.get('RAW_MODEL')
 
-          # 1. Find a valid base model in their store to clone structurally
+          # Find a valid base model to clone
           base_model_key = None
           for key in ['DeepSeek-Coder-1.3B-Instruct', 'deepseek-coder-1.3b-instruct', 'starcoder']:
               if key in LanguageModelStore:
@@ -117,29 +136,15 @@ jobs:
           if not base_model_key:
               base_model_key = list(LanguageModelStore.keys())[0]
 
-          print(f'Cloning base model configuration from: {base_model_key}')
           cloned_obj = copy.deepcopy(LanguageModelStore[base_model_key])
-          
-          # Update the identifiers to point to your Qwen model
           cloned_obj.model_repr = model_name
           cloned_obj.model_name = model_name
 
-          # Inject it into the runtime dictionary to prevent KeyErrors
+          # Inject into dictionary
           LanguageModelStore[model_name] = cloned_obj
-          print(f'Successfully injected {model_name} into the LanguageModelStore.')
+          print(f'Successfully injected {model_name} into LanguageModelStore.')
 
-          # 2. To avoid any vLLM errors, we hijack build_runner directly in memory
-          # and force it to use the standard HuggingFace runner.
-          try:
-              from lcb_runner.runner.huggingface_runner import HuggingFaceRunner
-              def custom_build_runner(args, model):
-                  print('Forcing HuggingFaceRunner to avoid vLLM requirements.')
-                  return HuggingFaceRunner(args, model)
-              runner_utils.build_runner = custom_build_runner
-          except ImportError:
-              print('HuggingFaceRunner could not be imported directly. Proceeding with default runner allocation.')
-
-          # 3. Spoof the terminal CLI arguments that main() looks for
+          # Spoof the terminal CLI arguments
           sys.argv = [
               'lcb_runner.runner.main',
               '--model', model_name,
@@ -151,7 +156,6 @@ jobs:
               '--tensor_parallel_size', '1'
           ]
 
-          # Run the benchmark
           main()
           " || echo "Execution notice triggered. Checking output directory..."
 
