@@ -72,7 +72,7 @@ jobs:
           echo "Note: Using supported LiveCodeBench CLI only. Invalid flags like --max_new_tokens were removed."
           echo "Tiny 0.5B model → expect low scores. This run will show exactly where it passes vs fails."
 
-      - name: 07. Run LiveCodeBench evaluation (Forced Dictionary Injection + Fallbacks)
+      - name: 07. Run LiveCodeBench evaluation (Append Injection + Fallbacks)
         id: evaluation
         run: |
           echo "=================================================================="
@@ -87,7 +87,7 @@ jobs:
 
           echo "Injecting mapping for $RAW_MODEL into LiveCodeBench source..."
           
-          # Crucial: Exporting the variable to the environment so Python can read it!
+          # Export the bash variable so the inline Python script can see it
           export RAW_MODEL
           
           python -c "
@@ -95,39 +95,32 @@ jobs:
           try:
               model_name = os.environ.get('RAW_MODEL', 'Qwen/Qwen2.5-Coder-0.5B-Instruct')
               
-              with open('lcb_runner/runner/main.py', 'r') as f:
-                  main_code = f.read()
-              
-              # FALLBACK LOGIC: We try to use deepseek-coder first, then starcoder as a safety net
-              injection = f'''
+              # Append at the bottom of the file to completely bypass function indentation errors
+              with open('lcb_runner/runner/main.py', 'a') as f:
+                  f.write(f'''
+          # --- Injection for Custom Model ---
           from lcb_runner.lm_styles import LanguageModelStore
+          
           if \"deepseek-coder-1.3b-instruct\" in LanguageModelStore:
               LanguageModelStore[\"{model_name}\"] = \"deepseek-coder-1.3b-instruct\"
-              print(\"Mapped to deepseek-coder-1.3b-instruct\")
+              print(\"Successfully mapped to deepseek-coder-1.3b-instruct in memory!\")
           elif \"starcoder\" in LanguageModelStore:
               LanguageModelStore[\"{model_name}\"] = \"starcoder\"
               print(\"Mapped to starcoder as fallback!\")
           else:
-              # Worst case, grab the very first available model in their dictionary
               first_model = list(LanguageModelStore.keys())[0]
               LanguageModelStore[\"{model_name}\"] = first_model
               print(f\"Mapped to fallback model: {{first_model}}\")
-          '''
-              
-              # Place injection right before the main block handles it
-              main_code = main_code.replace('def main():', 'def main():' + injection)
-              
-              with open('lcb_runner/runner/main.py', 'w') as f:
-                  f.write(main_code)
+          ''')
                   
-              print('Successfully forced injection into main.py memory!')
+              print('Successfully forced injection into the bottom of main.py!')
           except Exception as e:
               print(f'Failed to manipulate files: {e}')
           "
 
           echo "Starting runner execution..."
           
-          # No pipes like 'tee' used here. If Python crashes, GitHub fails loudly.
+          # No pipes like 'tee' used here. If Python crashes, GitHub fails loudly and immediately.
           python -m lcb_runner.runner.main \
             --model "$RAW_MODEL" \
             --scenario "$SCENARIO" \
